@@ -35,14 +35,11 @@ class key_indexer:
         self.counter = 0
         self.dictionary = {}
         
-    def get(self, key):
+    def index(self, key):
         if key not in self.dictionary:
             self.counter += 1
             self.dictionary[key] = self.counter
         return self.dictionary[key]
-        
-    def get_dict(self):
-        return self.dictionary
 
 class distance_measure_by_geom:
     def __init__(self):
@@ -78,23 +75,24 @@ class edge_length_collecter:
         self.indexer = key_indexer()
         self.distance_measure = distance_measure
         
-    def add(self, geom, ix):
+    def add(self, feature):
+        geom = feature.geometry()
         # only the first part will be considered
         pl = next(geom.constParts())
         geom_pl = QgsGeometry.fromPolyline(pl)
         
-        index_start = self.indexer.get(pl.startPoint().asWkt())
-        index_end   = self.indexer.get(pl.endPoint().asWkt())
+        index_start = self.indexer.index(pl.startPoint().asWkt())
+        index_end   = self.indexer.index(pl.endPoint().asWkt())
         length      = self.distance_measure.measure(geom_pl)
         
         self.edge_list.append((index_start, index_end,
-                               {'ix': ix,
+                               {'feature': feature,
                                 'length': length}))
     def get(self):
         return self.edge_list
     
     def get_index_dictionary(self):
-        return self.indexer.get_dict()
+        return self.indexer.dictionary
 
 def select_all(paths):
     endpoints = {k[0] for (k,v) in paths.items()}
@@ -431,11 +429,12 @@ class RemoveDanglingEdges(QgsProcessingAlgorithm):
         
         edge_collecter = edge_length_collecter(distance_measure)
         
-        for (ix, f) in enumerate(source.getFeatures()):
+        features = source.getFeatures()
+        for (ix, f) in enumerate(features):
             if feedback.isCanceled():
                 raise QgsProcessingException('Cancelled.')
                 
-            edge_collecter.add(f.geometry(), ix)
+            edge_collecter.add(f)
             feedback.setProgress(int(ix * total))
             
         feedback.setProgressText('Add edges to a graph...')
@@ -477,20 +476,8 @@ class RemoveDanglingEdges(QgsProcessingAlgorithm):
                          feedback)
         
         feedback.setProgressText('Copying %d remaining features...' % G.number_of_edges())
-        indices_to_be_copied = set()
-        for e in G.edges:
-            if feedback.isCanceled():
-                raise QgsProcessingException('Cancelled.')
-            
-            indices_to_be_copied.add(G.edges[e]['ix'])
-        
-        for (ix, f) in enumerate(source.getFeatures()):
-            if feedback.isCanceled():
-                raise QgsProcessingException('Cancelled.')
-            
-            if ix in indices_to_be_copied:
-                sink.addFeature(f, QgsFeatureSink.FastInsert)
-            feedback.setProgress(int(ix * total))
+        features = [G.edges[e]['feature'] for e in G.edges]
+        sink.addFeatures(features, QgsFeatureSink.FastInsert)
         
         feedback.setProgressText('Done.')
         
