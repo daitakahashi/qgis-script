@@ -6,7 +6,8 @@
 * AUTHOR(S): Daisuke Takahashi <dtakahshi42@gmail.com>                    *
 *                                                                         *
 *   This program is free software; you can redistribute it and/or modify  *
-*   it under the terms of the GNU General Public License version 3.       *                                                               *                                                                         *
+*   it under the terms of the GNU General Public License version 3.       *
+*                                                                         *
 ***************************************************************************
 """
 
@@ -19,6 +20,7 @@ from qgis.core import (QgsProcessing,
                        QgsProcessingParameterFeatureSink,
                        QgsProcessingParameterNumber,
                        QgsProcessingParameterBoolean,
+                       QgsProcessingParameterEnum,
                        QgsCoordinateReferenceSystem,
                        QgsCoordinateTransformContext,
                        QgsDistanceArea,
@@ -67,13 +69,13 @@ class distance_measure_by_ellipsoid:
 
     def measurement_type(self):
         return 'ellipsoid'
-        
-
+    
 class edge_length_collecter:
-    def __init__(self, distance_measure):
+    def __init__(self, distance_measure, edge_ordering):
         self.edge_list = []
         self.indexer = key_indexer()
         self.distance_measure = distance_measure
+        self.edge_ordering = edge_ordering
         
     def add(self, feature):
         geom = feature.geometry()
@@ -85,7 +87,8 @@ class edge_length_collecter:
         index_end   = self.indexer.index(pl.endPoint().asWkt())
         length      = self.distance_measure.measure(geom_pl)
         
-        self.edge_list.append((index_start, index_end,
+        edge = self.edge_ordering(index_start, index_end)
+        self.edge_list.append((edge[0], edge[1],
                                {'feature': feature,
                                 'length': length}))
     def get(self):
@@ -94,26 +97,53 @@ class edge_length_collecter:
     def get_index_dictionary(self):
         return self.indexer.dictionary
 
-def select_all(paths):
-    endpoints = {k[0] for (k,v) in paths.items()}
+class search_bidirectional:
+    def is_dangling(self, G, v):
+        return G.degree(v) == 1
+    def danglings(self, G):
+        return {v for (v, d) in G.degree if d == 1}
+    def is_path_internode(self, G, v):
+        return G.degree(v) == 2
+    def inward_degree(self, G, v):
+        return G.degree(v)
+    def is_bidirectional(self):
+        return True
+
+class search_directional:
+    def is_dangling(self, G, v):
+        return G.degree(v) == 1 and G.out_degree(v) == 1
+    def danglings(self, G):
+        return {v for (v, d) in G.degree if d == 1 and G.out_degree(v) == 1}
+    def is_path_internode(self, G, v):
+        return G.in_degree(v) == 1 and G.out_degree(v) == 1
+    def inward_degree(self, G, v):
+        return G.out_degree(v)
+    def is_bidirectional(self):
+        return False
+
+def select_all(paths, G, search_strategy):
+    endpoints = {k for k in paths}
     segments  = set()
     for (ignore, ps) in paths.items():
         for x in ps:
             segments.update(x['path'])
     return (segments, endpoints)
 
-def select_conservative(paths):
+def select_conservative(paths, G, search_strategy):
     endpoints = set()
     segments  = set()
-    for ((endpoint, deg), ps) in paths.items():
+    for (endpoint, ps) in paths.items():
+        deg = G.degree(endpoint)
         if (deg > 1) and (len(ps) == deg - 1):
             # Several dangling paths are coming into this endpoint,
             # and the endpoint is supported by exactly one non-dangling path.
             # The longest dangring path will survive
             ps.sort(key=lambda x: x['L'])
             longest = ps.pop()
-            # Reconsider a starting point of the survived dangling path
-            endpoints.add(longest['start'])
+            # Reconsider the longest dangling path again if the endpoint
+            # connects the path to an inward network
+            if search_strategy.is_bidirectional() or search_strategy.inward_degree(G, endpoint) == 1:
+                endpoints.add(longest['start'])
             for x in ps:
                 segments.update(x['path'])
         else:
@@ -122,8 +152,11 @@ def select_conservative(paths):
                 endpoints.add(x['start'])
     return (segments, endpoints)
 
-def edge_removal(G, threshold_length, loop_range, path_selecter, feedback):
-    work = {v for (v, d) in G.degree if d == 1}
+def edge_removal(G, threshold_length, loop_range,
+                 path_selecter, search_strategy,
+                 feedback):
+    # work = {v for (v, d) in G.degree if d == 1}
+    work = search_strategy.danglings(G)
     progress_proportion = 0
     
     for ix in loop_range:
@@ -133,9 +166,10 @@ def edge_removal(G, threshold_length, loop_range, path_selecter, feedback):
         work_count = len(work)
         work_next = set()
         dangling_paths = {}
+        feedback.pushInfo('Round %d start: %d candidates' % (ix, work_count))
         
         for v in work:
-            if G.degree(v) == 1:
+            if search_strategy.is_dangling(G, v): #G.degree(v) == 1:
                 adj = next(x for x in G[v])
                 # This is a dangling node, so there is only one (0-th) edge
                 edge_length = G[v][adj][0]['length']
@@ -149,7 +183,7 @@ def edge_removal(G, threshold_length, loop_range, path_selecter, feedback):
                     # Stop accumulation when it reaches to a branching point (degree > 2)
                     # or the other endpoint (degree == 1)
                     to_be_removed = set()
-                    while G.degree(w2) == 2:
+                    while search_strategy.is_path_internode(G, w2): # G.degree(w2) == 2:
                         to_be_removed.add((w1, w2))
                         # The node w1 is on a dangling path, and w2 is the next node
                         # (still on the dangling path).
@@ -167,18 +201,19 @@ def edge_removal(G, threshold_length, loop_range, path_selecter, feedback):
                     # If L < threshold, remove all edges from this leaf to the next
                     # branching point
                     if L < threshold_length:
-                        key = (w2, G.degree(w2))
-                        if key in dangling_paths:
-                            dangling_paths[key].append({'L':L, 'start':v, 'path':to_be_removed})
+                        if w2 in dangling_paths:
+                            dangling_paths[w2].append({'L':L, 'start':v, 'path':to_be_removed})
                         else:
-                            dangling_paths[key] = [{'L':L, 'start':v, 'path':to_be_removed}]
+                            dangling_paths[w2] = [{'L':L, 'start':v, 'path':to_be_removed}]
             
         if len(dangling_paths) == 0:
+            feedback.pushInfo('No dangling path found')
             ## no more edges to be removed
             break
         else:
-            (r, work) = path_selecter(dangling_paths)
+            (r, work) = path_selecter(dangling_paths, G, search_strategy)
             if len(r) == 0:
+                feedback.pushInfo('No more removable path found')
                 break
             
             G.remove_edges_from(r)
@@ -283,11 +318,13 @@ class RemoveDanglingEdges(QgsProcessingAlgorithm):
     # calling from the QGIS console.
 
     INPUT = 'INPUT'
-    OUTPUT = 'OUTPUT'
     THRESHOLD_LENGTH = 'THRESHOLD_LENGTH'
-    MAX_ITER = 'MAX_ITER'
     USE_ELLIPSOID = 'USE_ELLIPSOID'
     KEEP_LONG = 'KEEP_LONG'
+    DIRECTION = 'DIRECTION'
+    MAX_ITER = 'MAX_ITER'
+    
+    OUTPUT = 'OUTPUT'
 
     def tr(self, string):
         return QCoreApplication.translate('Processing', string)
@@ -344,6 +381,15 @@ class RemoveDanglingEdges(QgsProcessingAlgorithm):
                 self.KEEP_LONG,
                 self.tr('Merge dangling edges first to keep long paths inside'),
                 True
+            )
+        )
+
+        self.addParameter(
+            QgsProcessingParameterEnum(
+                self.DIRECTION,
+                self.tr('Search direction'),
+                ['bidirectional', 'from start', 'from end'],
+                defaultValue=0
             )
         )
 
@@ -408,6 +454,12 @@ class RemoveDanglingEdges(QgsProcessingAlgorithm):
             self.KEEP_LONG,
             context
         )
+
+        direction = self.parameterAsEnum(
+            parameters,
+            self.DIRECTION,
+            context
+        )
         
         maximum_iteration = self.parameterAsInt(
             parameters,
@@ -426,8 +478,29 @@ class RemoveDanglingEdges(QgsProcessingAlgorithm):
             distance_measure = distance_measure_by_ellipsoid(source.sourceCrs())
         else:
             distance_measure = distance_measure_by_geom()
+
+            
+        # G sholud be a multigraph, which is a graph allowing multiple edges
+        # between two nodes, because several lines may connect the same endpoints
+        # in different ways.
+        #
+        # Choose appropriate graph type and ordering according to the specified
+        # option.
+        if direction == 0:
+            G = nx.MultiGraph()
+            search_strategy = search_bidirectional()
+        else:
+            G = nx.MultiDiGraph()
+            search_strategy = search_directional()
         
-        edge_collecter = edge_length_collecter(distance_measure)
+        # QgsProcessingException('Not implemented yet!')
+        
+        if direction == 2:
+            edge_collecter = edge_length_collecter(distance_measure,
+                                                   lambda x, y: (y, x))
+        else:
+            edge_collecter = edge_length_collecter(distance_measure,
+                                                   lambda x, y: (x, y))
         
         features = source.getFeatures()
         for (ix, f) in enumerate(features):
@@ -438,10 +511,7 @@ class RemoveDanglingEdges(QgsProcessingAlgorithm):
             feedback.setProgress(int(ix * total))
             
         feedback.setProgressText('Add edges to a graph...')
-        # G sholud be a multigraph, which is a graph allowing multiple edges
-        # between two nodes, because several lines may connect the same endpoints
-        # in different ways.
-        G = nx.MultiGraph()
+            
         G.add_edges_from(edge_collecter.get())
         feedback.pushInfo('The graph has %d edges and %d nodes' %
                           (G.number_of_edges(), G.number_of_nodes()))
@@ -463,16 +533,16 @@ class RemoveDanglingEdges(QgsProcessingAlgorithm):
             feedback.pushInfo('Conservative removal: Keep subpaths longer than the threshold')
             feedback.setProgressText('Pass 1: Merge trees of short dangling edges')
             edge_removal(G, threshold_length, loop_range,
-                         select_conservative,
+                         select_conservative, search_strategy,
                          feedback)
             feedback.setProgressText('Pass 2: Remove remaining dangling edges (only once)')
             edge_removal(G, threshold_length, [1],
-                         select_all,
+                         select_all, search_strategy,
                          feedback)
         else:
             feedback.pushInfo('Agressive removal: Remove all short dangling edges for every round')
             edge_removal(G, threshold_length, loop_range,
-                         select_all,
+                         select_all, search_strategy,
                          feedback)
         
         feedback.setProgressText('Copying %d remaining features...' % G.number_of_edges())
