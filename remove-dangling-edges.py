@@ -133,29 +133,17 @@ def select_conservative(paths, G, search_strategy):
     endpoints = set()
     segments  = set()
     for (endpoint, ps) in paths.items():
-        deg = G.degree(endpoint)
-        if (deg > 1) and (len(ps) == deg - 1):
-            # Several dangling paths are coming into this endpoint,
-            # and the endpoint is supported by exactly one non-dangling path.
-            # The longest dangring path will survive
-            ps.sort(key=lambda x: x['L'])
-            longest = ps.pop()
-            # Reconsider the longest dangling path again if the endpoint
-            # connects the path to an inward network
-            if search_strategy.is_bidirectional() or search_strategy.inward_degree(G, endpoint) == 1:
-                endpoints.add(longest['start'])
-            for x in ps:
-                segments.update(x['path'])
-        else:
-            # Otherwise, keep everything and reconsider those dangling paths again
-            for x in ps:
-                endpoints.add(x['start'])
+        ps.sort(key=lambda x: x['L'])
+        longest = ps.pop()
+        if search_strategy.is_bidirectional() or search_strategy.inward_degree(G, endpoint) == 1:
+            endpoints.add(longest['start'])
+        for x in ps:
+            segments.update(x['path'])
     return (segments, endpoints)
 
 def edge_removal(G, threshold_length, loop_range,
                  path_selecter, search_strategy,
                  feedback):
-    # work = {v for (v, d) in G.degree if d == 1}
     work = search_strategy.danglings(G)
     progress_proportion = 0
     
@@ -169,7 +157,7 @@ def edge_removal(G, threshold_length, loop_range,
         feedback.pushInfo('Round %d start: %d candidates' % (ix, work_count))
         
         for v in work:
-            if search_strategy.is_dangling(G, v): #G.degree(v) == 1:
+            if search_strategy.is_dangling(G, v):
                 adj = next(x for x in G[v])
                 # This is a dangling node, so there is only one (0-th) edge
                 edge_length = G[v][adj][0]['length']
@@ -482,7 +470,7 @@ class RemoveDanglingEdges(QgsProcessingAlgorithm):
             
         # G sholud be a multigraph, which is a graph allowing multiple edges
         # between two nodes, because several lines may connect the same endpoints
-        # in different ways.
+        # through different ways.
         #
         # Choose appropriate graph type and ordering according to the specified
         # option.
@@ -493,8 +481,8 @@ class RemoveDanglingEdges(QgsProcessingAlgorithm):
             G = nx.MultiDiGraph()
             search_strategy = search_directional()
         
-        # QgsProcessingException('Not implemented yet!')
-        
+        # When finding danglings from endpoints, build a graph with reverseing edges
+        # directions.
         if direction == 2:
             edge_collecter = edge_length_collecter(distance_measure,
                                                    lambda x, y: (y, x))
