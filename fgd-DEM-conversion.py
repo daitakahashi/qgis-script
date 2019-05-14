@@ -140,9 +140,11 @@ class DEMRasterizer:
         self.lat = [ext.low[0], ext.high[0]]
         self.lon = [ext.low[1], ext.high[1]]
         #
+        # Because text-serialized float numbers are almost always different from
+        # original numbers, we need to accept some numerical inaccuracies.
+        # I hope that sizes of patches do not vary so much.
         average_bbox_size = sum([x.extent.size() for x in patches])/len(patches)
         #
-        # !! [セル数: N-S, セル数: W-E] !!
         grid_size = np.round(self.extent.size()/average_bbox_size).astype(int)
         patch_locations = [(grid_size[0] - int(x[0]) - 1, int(x[1])) # (N-S, E-W)
                            for x in [np.round((x.extent.low - self.extent.low)/average_bbox_size)
@@ -188,7 +190,8 @@ class DEMRasterizer:
                                                            cell_type[raster_type]['gdal'])
         destination.SetGeoTransform(geotransform)
         srs = osr.SpatialReference()
-        res = srs.ImportFromEPSG(4326)
+        # EPSG6668: JGD2011
+        res = srs.ImportFromEPSG(6668)
         if res != 0:
             raise RuntimeError(repr(res) + ': could not import from EPSG')
         # Qgis complains that there are no crs information... why?
