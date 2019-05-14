@@ -6,6 +6,7 @@ import zipfile
 import lxml.etree as ET
 import pandas as pd
 import numpy as np
+from joblib import Parallel, delayed
 
 from osgeo import gdal
 from osgeo import osr
@@ -49,8 +50,16 @@ ns = {
     'gml': 'http://www.opengis.net/gml/3.2'
 }
 
-DEM_STATE_TYPE = np.byte
-DEM_CELL_TYPE = np.float32
+cell_type = {
+    'Status': {
+        'np': np.byte,
+        'gdal': gdal.GDT_Byte
+    },
+    'Altitude': {
+        'np': np.float32,
+        'gdal': gdal.GDT_Float32
+    }
+}
 
 class demPatch5m:
     def __init__(self, et):
@@ -84,9 +93,9 @@ class demPatch5m:
         dem_data_path = './DEM/coverage/gml:rangeSet/gml:DataBlock/gml:tupleList'
         tbl = pd.read_csv(io.StringIO(et.find(dem_data_path, ns).text),
                           header=None,
-                          dtype={'Altitude': DEM_CELL_TYPE},
-                          converters={'Type': conv_type},
-                          names=['Type', 'Altitude'])
+                          dtype={'Altitude': cell_type['Altitude']['np']},
+                          converters={'Status': conv_type},
+                          names=['Status', 'Altitude'])
         #
         # また，末尾部分で連続した構成点の値が存在しない場合は，valuesにおける値の指定
         # を省略することができる。valueの配列で設定された値の数がグリッドセルの末尾に
@@ -100,11 +109,11 @@ class demPatch5m:
         #
         # The default value is 'nodata'
         self.state_array = np.full(cell_count, conv_type('データなし'),
-                                   dtype=DEM_STATE_TYPE)
+                                   dtype=cell_type['Status']['np'])
         self.cell_array = np.full(cell_count, -9999.0,
-                                  dtype=DEM_CELL_TYPE)
+                                  dtype=cell_type['Altitude']['np'])
         #
-        self.state_array[npaddings:(npaddings + tbl.shape[0])] = tbl['Type']
+        self.state_array[npaddings:(npaddings + tbl.shape[0])] = tbl['Status']
         self.cell_array[npaddings:(npaddings + tbl.shape[0])]  = tbl['Altitude']
         #
         self.cell_array.shape = (shape[1], shape[0])
@@ -138,49 +147,68 @@ class DEMRasterizer:
             225  # E-W (x)
         ])*self.grid_size).astype(int)
         #
-        self.raster = np.full(tuple(self.image_dimension), -9999.0,
-                              dtype=DEM_CELL_TYPE)
+        raster = np.full(tuple(self.image_dimension), -9999.0,
+                              dtype=cell_type['Altitude']['np'])
         for ((loc_y, loc_x), p) in zip(self.patch_locations, self.patches):
-            start_ix_x = loc_x*225 # E-W
             start_ix_y = loc_y*150 # N-S
+            start_ix_x = loc_x*225 # E-W
             # Numpy stores data in row major order. And the first index is a row index.
-            self.raster[start_ix_y:(start_ix_y + 150),:][:,start_ix_x:(start_ix_x + 225)] =  p.cell_array
+            raster[start_ix_y:(start_ix_y + 150),:][:,start_ix_x:(start_ix_x + 225)] =  p.cell_array
         #
-        self.state = np.full(tuple(self.image_dimension), conv_type('データなし'),
-                             dtype=DEM_STATE_TYPE)
+        status = np.full(tuple(self.image_dimension), conv_type('データなし'),
+                             dtype=cell_type['Status']['np'])
         for ((loc_y, loc_x), p) in zip(self.patch_locations, self.patches):
-            start_ix_x = loc_x*225 # E-W
             start_ix_y = loc_y*150 # N-S
+            start_ix_x = loc_x*225 # E-W
             # Numpy stores data in row major order. And the first index is a row index.
-            self.state[start_ix_y:(start_ix_y + 150),:][:,start_ix_x:(start_ix_x + 225)] =  p.state_array
+            status[start_ix_y:(start_ix_y + 150),:][:,start_ix_x:(start_ix_x + 225)] =  p.state_array
+        #
+        self.raster = {
+            'Altitude': raster,
+            'Status': status
+        }
         return
     
-    def write_raster(self):
-        fname = Path(Path(self.zipfile_path.name).stem).with_suffix('.tif')
+    def write_raster(self, raster_type='Altitude', dest_dir='.'):
+        fpath = (Path(dest_dir)
+                 / (Path(self.zipfile_path.name).stem + '_' + raster_type)).with_suffix('.tif')
+        #
+        raster = self.raster[raster_type]
         #
         (xmin, ymin, xmax, ymax) = [min(self.lon), min(self.lat),
                                     max(self.lon), max(self.lat)]
-        dx = (xmax - xmin)/self.raster.shape[1]
-        dy = (ymax - ymin)/self.raster.shape[0]
+        dx = (xmax - xmin)/raster.shape[1]
+        dy = (ymax - ymin)/raster.shape[0]
         geotransform = (xmin, dx, 0, ymax, 0, -dy)
-        destination = gdal.GetDriverByName('GTiff').Create(fname.name,
-                                                           self.raster.shape[1],
-                                                           self.raster.shape[0],
+        destination = gdal.GetDriverByName('GTiff').Create(fpath.name,
+                                                           raster.shape[1],
+                                                           raster.shape[0],
                                                            1,
-                                                           gdal.GDT_Float32)
+                                                           cell_type[raster_type]['gdal'])
         destination.SetGeoTransform(geotransform)
         srs = osr.SpatialReference()
         res = srs.ImportFromEPSG(4326)
         if res != 0:
             raise RuntimeError(repr(res) + ': could not import from EPSG')
         # Qgis complains that there are no crs information... why?
+        # Interestingly, there are no such problems on linux,
+        # so, I guess it is (1) an OSX issue, (2) a multibyte-pathname issue,
+        # or (3) something other problems in this code.
         destination.SetProjection(srs.ExportToWkt())
-        destination.GetRasterBand(1).WriteArray(self.raster)
+        destination.GetRasterBand(1).WriteArray(raster)
         destination.GetRasterBand(1).SetNoDataValue(-9999.0)
         destination.FlushCache()
         destination = None
         return
 
-for x in Path('PackDLMap').glob('*.zip'):
-     y = DEMRasterizer(str(x))
-     y.write_raster()
+def convert_dem (path):
+    r = DEMRasterizer(str(path))
+    r.write_raster('Altitude')
+    r.write_raster('Status')
+    return
+
+# Convert all zip files in a directory 'PackDLMap'
+Parallel(n_jobs = 8)(
+    delayed(convert_dem)(p)
+    for p in Path('PackDLMap').glob('*.zip')
+)
