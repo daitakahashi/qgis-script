@@ -11,7 +11,9 @@ from joblib import Parallel, delayed
 from osgeo import gdal
 from osgeo import osr
 
-# v.4.1のドキュメントとv4.1のschemaを参照した
+# reference:
+# 基盤地図情報ダウンロードデータ ファイル仕様書 第4.1版
+# FGD_GMLSchema.xsd v4.1
 
 def read_as_num(txt):
     return np.array([float(x) for x in txt.strip().split(' ') if x != ''])
@@ -61,7 +63,7 @@ cell_type = {
     }
 }
 
-class demPatch5m:
+class demPatch:
     def __init__(self, et):
         georange = et.find('./DEM/coverage/gml:boundedBy/gml:Envelope', ns)
         self.extent = BBox(read_as_num(georange.find('./gml:lowerCorner', ns).text),
@@ -79,9 +81,9 @@ class demPatch5m:
         # 5m メッシュ(標高) :      [0, 0]   [224, 149]
         # 10m メッシュ(標高) :     [0, 0]   [1124, 749]
         # 10m メッシュ(火山標高) : [0, 0]   [1124, 749]
-        # * shapeはそれぞれ(225, 150), (225, 150), (1125, 750), (1125, 750)となる
         indexRange = np.array([read_as_num(d_index.find('./gml:low', ns).text),
                                read_as_num(d_index.find('./gml:high', ns).text)]).astype(int)
+        # +1 to include endpoints
         shape = tuple(indexRange[1,:] - indexRange[0,:] + 1)
         cell_count = np.prod(shape)
         #
@@ -120,7 +122,7 @@ class demPatch5m:
         self.state_array[npaddings:(npaddings + tbl.shape[0])] = tbl['Status']
         self.cell_array[npaddings:(npaddings + tbl.shape[0])]  = tbl['Altitude']
         #
-        # numpy arrayはrow majorであることに注意
+        # numpy array is row major
         self.cell_array.shape = (shape[1], shape[0])
         self.state_array.shape = (shape[1], shape[0])
         return
@@ -131,7 +133,7 @@ class DEMRasterizer:
         #
         zp = zipfile.ZipFile(str(self.zipfile_path))
         zp_filelist = [x.filename for x in zp.infolist()]
-        patches = [demPatch5m(ET.parse(zp.open(x))) for x in zp_filelist]
+        patches = [demPatch(ET.parse(zp.open(x))) for x in zp_filelist]
         ext = patches[0].extent
         for x in patches:
             ext = ext.merge(x.extent)
@@ -142,7 +144,7 @@ class DEMRasterizer:
         #
         # Because text-serialized float numbers are almost always different from
         # original numbers, we need to accept some numerical inaccuracies.
-        # I hope that sizes of patches do not vary so much.
+        # I hope that sizes of these patches do not vary so much.
         average_bbox_size = sum([x.extent.size() for x in patches])/len(patches)
         #
         grid_size = np.round(self.extent.size()/average_bbox_size).astype(int)
@@ -150,19 +152,19 @@ class DEMRasterizer:
                            for x in [np.round((x.extent.low - self.extent.low)/average_bbox_size)
                                      for x in patches]]
         #
-        shape = patches[0].cell_array.shape
-        image_dimension = (shape*grid_size).astype(int)
+        pshape = patches[0].cell_array.shape
+        image_dimension = (pshape*grid_size).astype(int)
         #
         raster = np.full(tuple(image_dimension), -9999.0,
                          dtype=cell_type['Altitude']['np'])
         status = np.full(tuple(image_dimension), conv_type('データなし'),
                          dtype=cell_type['Status']['np'])
         for ((loc_y, loc_x), p) in zip(patch_locations, patches):
-            start_y = loc_y*shape[0]   # N
-            start_x = loc_x*shape[1]   # W
-            end_y = start_y + shape[0] # S (not included)
-            end_x = start_x + shape[1] # E (not included)
-            # Numpy stores data in row major order. And the first index is a row index.
+            start_y = loc_y*pshape[0]   # N
+            start_x = loc_x*pshape[1]   # W
+            end_y = start_y + pshape[0] # S (not included)
+            end_x = start_x + pshape[1] # E (not included)
+            # Numpy stores data in row major order. The first index is a row index.
             raster[start_y:end_y,:][:,start_x:end_x] = p.cell_array
             status[start_y:end_y,:][:,start_x:end_x] = p.state_array
         #
