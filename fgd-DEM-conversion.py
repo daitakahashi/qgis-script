@@ -1,10 +1,12 @@
 
-import io
+from io import StringIO
 from pathlib import Path
-import zipfile
+from itertools import chain
+from zipfile import ZipFile
+from argparse import ArgumentParser
 
-import lxml.etree as ET
-import pandas as pd
+from lxml.etree import parse as parseXML
+from pandas import read_csv
 import numpy as np
 from joblib import Parallel, delayed
 
@@ -53,7 +55,7 @@ ns = {
 }
 
 cell_type = {
-    'Status': {
+    'Ground_type': {
         'np': np.byte,
         'gdal': gdal.GDT_Byte
     },
@@ -97,11 +99,11 @@ class demPatch:
         #
         # Read data table:
         dem_data_path = './DEM/coverage/gml:rangeSet/gml:DataBlock/gml:tupleList'
-        tbl = pd.read_csv(io.StringIO(et.find(dem_data_path, ns).text),
-                          header=None,
-                          dtype={'Altitude': cell_type['Altitude']['np']},
-                          converters={'Status': conv_type},
-                          names=['Status', 'Altitude'])
+        tbl = read_csv(StringIO(et.find(dem_data_path, ns).text),
+                       header=None,
+                       dtype={'Altitude': cell_type['Altitude']['np']},
+                       converters={'Ground_type': conv_type},
+                       names=['Ground_type', 'Altitude'])
         #
         # また，末尾部分で連続した構成点の値が存在しない場合は，valuesにおける値の指定
         # を省略することができる。valueの配列で設定された値の数がグリッドセルの末尾に
@@ -115,11 +117,11 @@ class demPatch:
         #
         # By default, a cell's value is 'nodata'
         self.state_array = np.full(cell_count, conv_type('データなし'),
-                                   dtype=cell_type['Status']['np'])
+                                   dtype=cell_type['Ground_type']['np'])
         self.cell_array = np.full(cell_count, -9999.0,
                                   dtype=cell_type['Altitude']['np'])
         #
-        self.state_array[npaddings:(npaddings + tbl.shape[0])] = tbl['Status']
+        self.state_array[npaddings:(npaddings + tbl.shape[0])] = tbl['Ground_type']
         self.cell_array[npaddings:(npaddings + tbl.shape[0])]  = tbl['Altitude']
         #
         # numpy array is row major
@@ -131,9 +133,9 @@ class DEMRasterizer:
     def __init__(self, zip_file_name):
         self.zipfile_path = Path(zip_file_name)
         #
-        zp = zipfile.ZipFile(str(self.zipfile_path))
+        zp = ZipFile(str(self.zipfile_path))
         zp_filelist = [x.filename for x in zp.infolist()]
-        patches = [demPatch(ET.parse(zp.open(x))) for x in zp_filelist]
+        patches = [demPatch(parseXML(zp.open(x))) for x in zp_filelist]
         ext = patches[0].extent
         for x in patches:
             ext = ext.merge(x.extent)
@@ -157,8 +159,8 @@ class DEMRasterizer:
         #
         raster = np.full(tuple(image_dimension), -9999.0,
                          dtype=cell_type['Altitude']['np'])
-        status = np.full(tuple(image_dimension), conv_type('データなし'),
-                         dtype=cell_type['Status']['np'])
+        gtype = np.full(tuple(image_dimension), conv_type('データなし'),
+                        dtype=cell_type['Ground_type']['np'])
         for ((loc_y, loc_x), p) in zip(patch_locations, patches):
             start_y = loc_y*pshape[0]   # N
             start_x = loc_x*pshape[1]   # W
@@ -166,11 +168,11 @@ class DEMRasterizer:
             end_x = start_x + pshape[1] # E (not included)
             # Numpy stores data in row major order. The first index is a row index.
             raster[start_y:end_y,:][:,start_x:end_x] = p.cell_array
-            status[start_y:end_y,:][:,start_x:end_x] = p.state_array
+            gtype[start_y:end_y,:][:,start_x:end_x] = p.state_array
         #
         self.raster = {
             'Altitude': raster,
-            'Status': status
+            'Ground_type': gtype
         }
         return
     
@@ -207,14 +209,41 @@ class DEMRasterizer:
         destination = None
         return
 
-def convert_dem (path):
-    r = DEMRasterizer(str(path))
-    r.write_raster('Altitude')
-    r.write_raster('Status')
+def convert_dem (path_string, destdir, write_ground_type):
+    r = DEMRasterizer(path_string)
+    r.write_raster('Altitude', destdir)
+    if write_ground_type:
+        r.write_raster('Ground_type', destdir)
     return
 
-# Convert all zip files in a directory 'PackDLMap'
-Parallel(n_jobs = 8)(
-    delayed(convert_dem)(p)
-    for p in Path('PackDLMap').glob('*.zip')
-)
+argparser = ArgumentParser(description = '''
+Covert DEMs downloaded from Geospatial Information Authority of Japan to GeoTiffs
+''')
+argparser.add_argument('zipfiles', metavar='zipfile', type=str, nargs='*',
+                       help='a zipfile containing GML files')
+argparser.add_argument('--dest-dir', dest='dest', type=str,
+                       default='.',
+                       help='a destination directory to write tiff files')
+argparser.add_argument('--with-ground-type', dest='with_type',
+                       action='store_true',
+                       default=False,
+                       help='also write types of DEM points (as separate GeoTiffs)')
+argparser.add_argument('--nproc', type=int,
+                       default=-1,
+                       help='the number of processes (default: same as the number of CPU cores)')
+argparser.add_argument('--target-dir', dest='target_dirs', type=str, nargs='+',
+                       default=None,
+                       help='process all zip files in this directory')
+
+if __name__ == '__main__':
+    args = argparser.parse_args()
+    #
+    targets = (Path(x) for x in args.zipfiles)
+    if args.target_dirs is not None:
+        targets = chain(targets,
+                        *[Path(d).glob('*.zip') for d in args.target_dirs])
+    #
+    Parallel(n_jobs = args.nproc)(
+        delayed(convert_dem)(p, args.dest, args.with_type) for p in targets
+    )
+    exit
