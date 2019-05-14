@@ -11,7 +11,7 @@ from joblib import Parallel, delayed
 from osgeo import gdal
 from osgeo import osr
 
-# v.4.0のドキュメントとv4.1のschemaを参照した
+# v.4.1のドキュメントとv4.1のschemaを参照した
 
 def read_as_num(txt):
     return np.array([float(x) for x in txt.strip().split(' ') if x != ''])
@@ -73,13 +73,17 @@ class demPatch5m:
         # 味している。
         # セル番号 (m, n) で，mはx軸の値，nはy軸の値である。(p.17)
         #
-        # low属性値: [0, 0], high属性値: [224, 149] (p.17)
-        self.indexRange = np.array([read_as_num(d_index.find('./gml:low', ns).text),
-                                    read_as_num(d_index.find('./gml:high', ns).text)]).astype(int)
-        shape = tuple(self.indexRange[1,:] - self.indexRange[0,:] + 1)
+        # 表2-1 DEM種別ごとのextent設定値 (p.17)
+        # DEM種別                 low属性値 high属性値
+        # 5m メッシュ(数値地形) :  [0, 0]   [224, 149]
+        # 5m メッシュ(標高) :      [0, 0]   [224, 149]
+        # 10m メッシュ(標高) :     [0, 0]   [1124, 749]
+        # 10m メッシュ(火山標高) : [0, 0]   [1124, 749]
+        # * shapeはそれぞれ(225, 150), (225, 150), (1125, 750), (1125, 750)となる
+        indexRange = np.array([read_as_num(d_index.find('./gml:low', ns).text),
+                               read_as_num(d_index.find('./gml:high', ns).text)]).astype(int)
+        shape = tuple(indexRange[1,:] - indexRange[0,:] + 1)
         cell_count = np.prod(shape)
-        if shape != (225, 150):
-            raise ValueError('Shape of an image should be (225, 150), but got %s' % shape)
         #
         # なお，先頭部分で連続した構成点の値が存在しない場合は，valuesにおける値の指定
         # を省略することができる。その場合，実際に構成点の値が開始するグリッドセルを
@@ -107,7 +111,7 @@ class demPatch5m:
         # へ順に並んでおり，東端に達すると次に，y軸の負方向（北→南の順）に進む方式で
         # 南東端に至る配列であることを示している。(p.18)
         #
-        # The default value is 'nodata'
+        # By default, a cell's value is 'nodata'
         self.state_array = np.full(cell_count, conv_type('データなし'),
                                    dtype=cell_type['Status']['np'])
         self.cell_array = np.full(cell_count, -9999.0,
@@ -116,6 +120,7 @@ class demPatch5m:
         self.state_array[npaddings:(npaddings + tbl.shape[0])] = tbl['Status']
         self.cell_array[npaddings:(npaddings + tbl.shape[0])]  = tbl['Altitude']
         #
+        # numpy arrayはrow majorであることに注意
         self.cell_array.shape = (shape[1], shape[0])
         self.state_array.shape = (shape[1], shape[0])
         return
@@ -126,42 +131,38 @@ class DEMRasterizer:
         #
         zp = zipfile.ZipFile(str(self.zipfile_path))
         zp_filelist = [x.filename for x in zp.infolist()]
-        self.patches = [demPatch5m(ET.parse(zp.open(x))) for x in zp_filelist]
-        ext = self.patches[0].extent
-        for x in self.patches:
+        patches = [demPatch5m(ET.parse(zp.open(x))) for x in zp_filelist]
+        ext = patches[0].extent
+        for x in patches:
             ext = ext.merge(x.extent)
         self.extent = ext
         #
         self.lat = [ext.low[0], ext.high[0]]
         self.lon = [ext.low[1], ext.high[1]]
         #
-        average_bbox_size = sum([x.extent.size() for x in self.patches])/len(self.patches)
+        average_bbox_size = sum([x.extent.size() for x in patches])/len(patches)
         #
         # !! [セル数: N-S, セル数: W-E] !!
-        self.grid_size = np.round(self.extent.size()/average_bbox_size).astype(int)
-        self.patch_locations = [(self.grid_size[0] - int(x[0]) - 1, int(x[1])) # (N-S, E-W)
-                                for x in [np.round((x.extent.low - self.extent.low)/average_bbox_size)
-                                          for x in self.patches]]
-        self.image_dimension = (np.array([
-            150, # N-S (y)
-            225  # E-W (x)
-        ])*self.grid_size).astype(int)
+        grid_size = np.round(self.extent.size()/average_bbox_size).astype(int)
+        patch_locations = [(grid_size[0] - int(x[0]) - 1, int(x[1])) # (N-S, E-W)
+                           for x in [np.round((x.extent.low - self.extent.low)/average_bbox_size)
+                                     for x in patches]]
         #
-        raster = np.full(tuple(self.image_dimension), -9999.0,
-                              dtype=cell_type['Altitude']['np'])
-        for ((loc_y, loc_x), p) in zip(self.patch_locations, self.patches):
-            start_ix_y = loc_y*150 # N-S
-            start_ix_x = loc_x*225 # E-W
-            # Numpy stores data in row major order. And the first index is a row index.
-            raster[start_ix_y:(start_ix_y + 150),:][:,start_ix_x:(start_ix_x + 225)] =  p.cell_array
+        shape = patches[0].cell_array.shape
+        image_dimension = (shape*grid_size).astype(int)
         #
-        status = np.full(tuple(self.image_dimension), conv_type('データなし'),
-                             dtype=cell_type['Status']['np'])
-        for ((loc_y, loc_x), p) in zip(self.patch_locations, self.patches):
-            start_ix_y = loc_y*150 # N-S
-            start_ix_x = loc_x*225 # E-W
+        raster = np.full(tuple(image_dimension), -9999.0,
+                         dtype=cell_type['Altitude']['np'])
+        status = np.full(tuple(image_dimension), conv_type('データなし'),
+                         dtype=cell_type['Status']['np'])
+        for ((loc_y, loc_x), p) in zip(patch_locations, patches):
+            start_y = loc_y*shape[0]   # N
+            start_x = loc_x*shape[1]   # W
+            end_y = start_y + shape[0] # S (not included)
+            end_x = start_x + shape[1] # E (not included)
             # Numpy stores data in row major order. And the first index is a row index.
-            status[start_ix_y:(start_ix_y + 150),:][:,start_ix_x:(start_ix_x + 225)] =  p.state_array
+            raster[start_y:end_y,:][:,start_x:end_x] = p.cell_array
+            status[start_y:end_y,:][:,start_x:end_x] = p.state_array
         #
         self.raster = {
             'Altitude': raster,
