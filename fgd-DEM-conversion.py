@@ -198,10 +198,6 @@ class DEMRasterizer:
         res = srs.ImportFromEPSG(6668)
         if res != 0:
             raise RuntimeError(repr(res) + ': could not import from EPSG')
-        # Qgis complains that there are no crs information... why?
-        # Interestingly, there are no such problems on linux,
-        # so, I guess it is (1) an OSX issue, (2) a multibyte-pathname issue,
-        # or (3) something other problems in this code.
         destination.SetProjection(srs.ExportToWkt())
         destination.GetRasterBand(1).WriteArray(raster)
         destination.GetRasterBand(1).SetNoDataValue(-9999.0)
