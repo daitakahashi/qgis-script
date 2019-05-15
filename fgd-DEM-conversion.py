@@ -1,16 +1,18 @@
 
 from io import StringIO
+from warnings import warn
 from pathlib import Path
 from itertools import chain
 from zipfile import ZipFile
 from argparse import ArgumentParser
 
 from xml.etree.ElementTree import parse as parseXML
-from pandas import read_csv
+from pandas import read_csv, Series
+from pandas.api.types import CategoricalDtype
 import numpy as np
 
 try:
-    from joglib import Parallel, delayed
+    from joblib import Parallel, delayed
 except ImportError:
     # use a fake version instead. no parallel prcessings
     def iterate(gen):
@@ -51,15 +53,15 @@ class BBox:
 # DEM構成点種別（列挙型）
 # DEM構成点の種別。(p.18)
 # 種別が「データなし」の場合，この属性値には ”-9999.” が設定される。(p.18)
-def conv_type(s):
-    return {
-        '地表面': 0,
-        '表層面': 1,
-        '海水面': 2,
-        '内水面': 3,
-        'その他': 4,
-        'データなし': -1
-    }[s]
+DEM_point_category = CategoricalDtype([
+    'データなし',
+    '地表面',
+    '表層面',
+    '海水面',
+    '内水面',
+    'その他'
+])
+NODATA_code = Series(['データなし'], dtype=DEM_point_category).cat.codes[0]
 
 ns = {
     'fgd': 'http://fgd.gsi.go.jp/spec/2008/FGD_GMLSchema',
@@ -79,12 +81,23 @@ cell_type = {
 
 class demPatch:
     def __init__(self, et):
-        coverage = et.find('./fgd:DEM/fgd:coverage', ns)
+        # Is this "coverage" unique for each file?
+        # Maybe the definition is,
+        # coverage [1..*] : CV_DiscreteGridPointCoverage
+        # このDEM区画を構成する被覆情報。
+        # CV_DiscreteGridPointCoverageは， JIS X7123で定義された離散型グリッド点被覆を
+        # 表現するためのクラスである。(p.16)
+        # allowing multipart files...
+        # I assume its uniqueness, and give a warning if it is not unique.
+        coverages = et.findall('./fgd:DEM/fgd:coverage', ns)
+        if len(coverages) != 1:
+            warn('multiple coverages found, but only the first occurence is used')
+        coverage = coverages[0]
         georange = coverage.find('./gml:boundedBy/gml:Envelope', ns)
         self.extent = BBox(read_as_num(georange.find('./gml:lowerCorner', ns).text),
                            read_as_num(georange.find('./gml:upperCorner', ns).text))
         d_index = coverage.find('./gml:gridDomain/gml:Grid/gml:limits/gml:GridEnvelope',
-                          ns)
+                                ns)
         # axisNames : Sequence<CharacterString>
         # グリッドセルの座標軸の名称。
         # 基盤地図情報では，”x y” と定義する。x軸は経度の正方向，y軸は緯度の正方向を意
@@ -104,7 +117,7 @@ class demPatch:
         cell_count = np.prod(shape)
         #
         # The default value is 'nodata'
-        self.state_array = np.full(cell_count, conv_type('データなし'),
+        self.state_array = np.full(cell_count, NODATA_code,
                                    dtype=cell_type['Ground_type']['np'])
         self.cell_array = np.full(cell_count, -9999.0,
                                   dtype=cell_type['Altitude']['np'])
@@ -118,15 +131,18 @@ class demPatch:
         ).astype(int)
         npaddings = startPoint[0] + startPoint[1]*shape[0]
         #
-        # Read data table:
+        # Read a data table:
         dem_data_path = './gml:rangeSet/gml:DataBlock/gml:tupleList'
         tbl = read_csv(StringIO(coverage.find(dem_data_path, ns).text),
                        header=None,
-                       dtype={'Altitude': cell_type['Altitude']['np']},
-                       converters={'Ground_type': conv_type},
+                       dtype={
+                           'Ground_type': DEM_point_category,
+                           'Altitude': cell_type['Altitude']['np']
+                       },
                        names=['Ground_type', 'Altitude'])
         #
-        self.state_array[npaddings:(npaddings + tbl.shape[0])] = tbl['Ground_type']
+        catcodes = tbl['Ground_type'].cat.codes.astype(cell_type['Ground_type']['np'])
+        self.state_array[npaddings:(npaddings + tbl.shape[0])] = catcodes
         self.cell_array[npaddings:(npaddings + tbl.shape[0])]  = tbl['Altitude']
         #
         # また，末尾部分で連続した構成点の値が存在しない場合は，valuesにおける値の指定
@@ -173,7 +189,7 @@ class DEMRasterizer:
         #
         raster = np.full(tuple(image_dimension), -9999.0,
                          dtype=cell_type['Altitude']['np'])
-        gtype = np.full(tuple(image_dimension), conv_type('データなし'),
+        gtype = np.full(tuple(image_dimension), NODATA_code,
                         dtype=cell_type['Ground_type']['np'])
         for ((loc_y, loc_x), p) in zip(patch_locations, patches):
             start_y = loc_y*pshape[0]   # N
@@ -196,6 +212,13 @@ class DEMRasterizer:
         #
         raster = self.raster[raster_type]
         #
+        # DEM区画は，標高を測量し，又は算定した地点の集合体であり，経緯度によって四角く分割された１メッシュに
+        # おける標高値の分布を数値標高モデルとして表現するためのクラスである。その１メッシュ内をグリッドによっ
+        # て格子状に分割したセルに対して，標高値が割り当てられる。ここで表現される数値標高モデルは，JIS X7123
+        # に準拠した被覆としての形式・構成となっている。
+        # DEM区画は，経緯度により四角く分割された１メッシュを表し，そのメッシュ内がさらにグリッドにより格子状に
+        # 分割されたセルに標高値が割り当てられる。(p.15)
+        # --> an "extent" in the dataset seems to be an extent of rectangular grid cells (not points)
         (xmin, ymin, xmax, ymax) = [min(self.lon), min(self.lat),
                                     max(self.lon), max(self.lat)]
         dx = (xmax - xmin)/raster.shape[1]
@@ -257,3 +280,4 @@ if __name__ == '__main__':
         delayed(convert_dem)(p, args.dest, args.with_type) for p in targets
     )
     exit
+
