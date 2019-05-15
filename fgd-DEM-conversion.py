@@ -5,10 +5,22 @@ from itertools import chain
 from zipfile import ZipFile
 from argparse import ArgumentParser
 
-from lxml.etree import parse as parseXML
+from xml.etree.ElementTree import parse as parseXML
 from pandas import read_csv
 import numpy as np
-from joblib import Parallel, delayed
+
+try:
+    from joglib import Parallel, delayed
+except ImportError:
+    # use a fake version instead. no parallel prcessings
+    def iterate(gen):
+        for x in gen:
+            pass
+    def Parallel(n_jobs = 1):
+        return iterate
+    def delayed(f):
+        return f
+                
 
 from osgeo import gdal
 from osgeo import osr
@@ -50,7 +62,7 @@ def conv_type(s):
     }[s]
 
 ns = {
-    None: 'http://fgd.gsi.go.jp/spec/2008/FGD_GMLSchema',
+    'fgd': 'http://fgd.gsi.go.jp/spec/2008/FGD_GMLSchema',
     'gml': 'http://www.opengis.net/gml/3.2'
 }
 
@@ -67,10 +79,12 @@ cell_type = {
 
 class demPatch:
     def __init__(self, et):
-        georange = et.find('./DEM/coverage/gml:boundedBy/gml:Envelope', ns)
+        coverage = et.find('./fgd:DEM/fgd:coverage', ns)
+        georange = coverage.find('./gml:boundedBy/gml:Envelope', ns)
         self.extent = BBox(read_as_num(georange.find('./gml:lowerCorner', ns).text),
                            read_as_num(georange.find('./gml:upperCorner', ns).text))
-        d_index = et.find('./DEM/coverage/gml:gridDomain/gml:Grid/gml:limits/gml:GridEnvelope', ns)
+        d_index = coverage.find('./gml:gridDomain/gml:Grid/gml:limits/gml:GridEnvelope',
+                          ns)
         # axisNames : Sequence<CharacterString>
         # グリッドセルの座標軸の名称。
         # 基盤地図情報では，”x y” と定義する。x軸は経度の正方向，y軸は緯度の正方向を意
@@ -89,40 +103,40 @@ class demPatch:
         shape = tuple(indexRange[1,:] - indexRange[0,:] + 1)
         cell_count = np.prod(shape)
         #
-        # なお，先頭部分で連続した構成点の値が存在しない場合は，valuesにおける値の指定
-        # を省略することができる。その場合，実際に構成点の値が開始するグリッドセルを
-        # startSequenceで指定する。(p.18) <-- startPoint?
-        startPoint = read_as_num(
-            et.find('./DEM/coverage/gml:coverageFunction/gml:GridFunction/gml:startPoint', ns).text
-        ).astype(int)
-        npaddings = startPoint[0] + startPoint[1]*shape[0]
-        #
-        # Read data table:
-        dem_data_path = './DEM/coverage/gml:rangeSet/gml:DataBlock/gml:tupleList'
-        tbl = read_csv(StringIO(et.find(dem_data_path, ns).text),
-                       header=None,
-                       dtype={'Altitude': cell_type['Altitude']['np']},
-                       converters={'Ground_type': conv_type},
-                       names=['Ground_type', 'Altitude'])
-        #
-        # また，末尾部分で連続した構成点の値が存在しない場合は，valuesにおける値の指定
-        # を省略することができる。valueの配列で設定された値の数がグリッドセルの末尾に
-        # 達しない場合，その後ろは省略されている。(p.18)
-        npaddings_end = cell_count - tbl.shape[0] - npaddings
-        #
-        # 基盤地図情報では，type属性値=”Linear”，scanDirection属性値=”+x –y” と設定する。
-        # この設定値は，先頭セルは北西端にあって，配列順序がx軸の正方向（西→東の順）
-        # へ順に並んでおり，東端に達すると次に，y軸の負方向（北→南の順）に進む方式で
-        # 南東端に至る配列であることを示している。(p.18)
-        #
-        # By default, a cell's value is 'nodata'
+        # The default value is 'nodata'
         self.state_array = np.full(cell_count, conv_type('データなし'),
                                    dtype=cell_type['Ground_type']['np'])
         self.cell_array = np.full(cell_count, -9999.0,
                                   dtype=cell_type['Altitude']['np'])
         #
+        # なお，先頭部分で連続した構成点の値が存在しない場合は，valuesにおける値の指定
+        # を省略することができる。その場合，実際に構成点の値が開始するグリッドセルを
+        # startSequenceで指定する。(p.18) <-- startPoint?
+        startPoint = read_as_num(
+            coverage.find('./gml:coverageFunction/gml:GridFunction/gml:startPoint',
+                    ns).text
+        ).astype(int)
+        npaddings = startPoint[0] + startPoint[1]*shape[0]
+        #
+        # Read data table:
+        dem_data_path = './gml:rangeSet/gml:DataBlock/gml:tupleList'
+        tbl = read_csv(StringIO(coverage.find(dem_data_path, ns).text),
+                       header=None,
+                       dtype={'Altitude': cell_type['Altitude']['np']},
+                       converters={'Ground_type': conv_type},
+                       names=['Ground_type', 'Altitude'])
+        #
         self.state_array[npaddings:(npaddings + tbl.shape[0])] = tbl['Ground_type']
         self.cell_array[npaddings:(npaddings + tbl.shape[0])]  = tbl['Altitude']
+        #
+        # また，末尾部分で連続した構成点の値が存在しない場合は，valuesにおける値の指定
+        # を省略することができる。valueの配列で設定された値の数がグリッドセルの末尾に
+        # 達しない場合，その後ろは省略されている。(p.18)
+        #
+        # 基盤地図情報では，type属性値=”Linear”，scanDirection属性値=”+x –y” と設定する。
+        # この設定値は，先頭セルは北西端にあって，配列順序がx軸の正方向（西→東の順）
+        # へ順に並んでおり，東端に達すると次に，y軸の負方向（北→南の順）に進む方式で
+        # 南東端に至る配列であることを示している。(p.18)
         #
         # numpy array is row major
         self.cell_array.shape = (shape[1], shape[0])
