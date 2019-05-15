@@ -1,4 +1,16 @@
 
+
+"""
+***************************************************************************
+* fgd-DEM-conversion.py: convert DEMs in FGD-GML format to GeoTiff        *
+* AUTHOR(S): Daisuke Takahashi <dtakahshi42@gmail.com>                    *
+*                                                                         *
+*   This program is free software; you can redistribute it and/or modify  *
+*   it under the terms of the GNU General Public License version 3.       *
+*                                                                         *
+***************************************************************************
+"""
+
 from io import StringIO
 from warnings import warn
 from pathlib import Path
@@ -23,7 +35,6 @@ except ImportError:
     def delayed(f):
         return f
                 
-
 from osgeo import gdal
 from osgeo import osr
 
@@ -54,12 +65,12 @@ class BBox:
 # DEM構成点の種別。(p.18)
 # 種別が「データなし」の場合，この属性値には ”-9999.” が設定される。(p.18)
 DEM_point_category = CategoricalDtype([
-    'データなし',
-    '地表面',
-    '表層面',
-    '海水面',
-    '内水面',
-    'その他'
+    'データなし',  # 0
+    '地表面',     # 1
+    '表層面',     # 2
+    '海水面',     # 3
+    '内水面',     # 4
+    'その他'      # 5
 ])
 NODATA_code = Series(['データなし'], dtype=DEM_point_category).cat.codes[0]
 
@@ -69,7 +80,7 @@ ns = {
 }
 
 cell_type = {
-    'Ground_type': {
+    'Cell_type': {
         'np': np.byte,
         'gdal': gdal.GDT_Byte
     },
@@ -118,7 +129,7 @@ class demPatch:
         #
         # The default value is 'nodata'
         self.state_array = np.full(cell_count, NODATA_code,
-                                   dtype=cell_type['Ground_type']['np'])
+                                   dtype=cell_type['Cell_type']['np'])
         self.cell_array = np.full(cell_count, -9999.0,
                                   dtype=cell_type['Altitude']['np'])
         #
@@ -136,12 +147,12 @@ class demPatch:
         tbl = read_csv(StringIO(coverage.find(dem_data_path, ns).text),
                        header=None,
                        dtype={
-                           'Ground_type': DEM_point_category,
+                           'Cell_type': DEM_point_category,
                            'Altitude': cell_type['Altitude']['np']
                        },
-                       names=['Ground_type', 'Altitude'])
+                       names=['Cell_type', 'Altitude'])
         #
-        catcodes = tbl['Ground_type'].cat.codes.astype(cell_type['Ground_type']['np'])
+        catcodes = tbl['Cell_type'].cat.codes.astype(cell_type['Cell_type']['np'])
         self.state_array[npaddings:(npaddings + tbl.shape[0])] = catcodes
         self.cell_array[npaddings:(npaddings + tbl.shape[0])]  = tbl['Altitude']
         #
@@ -190,7 +201,7 @@ class DEMRasterizer:
         raster = np.full(tuple(image_dimension), -9999.0,
                          dtype=cell_type['Altitude']['np'])
         gtype = np.full(tuple(image_dimension), NODATA_code,
-                        dtype=cell_type['Ground_type']['np'])
+                        dtype=cell_type['Cell_type']['np'])
         for ((loc_y, loc_x), p) in zip(patch_locations, patches):
             start_y = loc_y*pshape[0]   # N
             start_x = loc_x*pshape[1]   # W
@@ -202,7 +213,7 @@ class DEMRasterizer:
         #
         self.raster = {
             'Altitude': raster,
-            'Ground_type': gtype
+            'Cell_type': gtype
         }
         return
     
@@ -242,39 +253,36 @@ class DEMRasterizer:
         destination = None
         return
 
-def convert_dem (path_string, destdir, write_ground_type):
+def convert_dem (path_string, destdir, write_cell_type):
     r = DEMRasterizer(path_string)
     r.write_raster('Altitude', destdir)
-    if write_ground_type:
-        r.write_raster('Ground_type', destdir)
+    if write_cell_type:
+        r.write_raster('Cell_type', destdir)
     return
 
 argparser = ArgumentParser(description = '''
-Covert DEMs downloaded from Geospatial Information Authority of Japan to GeoTiffs
+Covert DEMs published by Geospatial Information Authority of Japan to GeoTiffs
 ''')
-argparser.add_argument('zipfiles', metavar='zipfile', type=str, nargs='*',
-                       help='a zipfile containing GML files')
+argparser.add_argument('targets', metavar='target', type=str, nargs='*',
+                       help='a target zip file or a directory containing zip files')
 argparser.add_argument('--dest-dir', dest='dest', type=str,
                        default='.',
                        help='a destination directory to write tiff files')
-argparser.add_argument('--with-ground-type', dest='with_type',
+argparser.add_argument('--with-cell-type', dest='with_type',
                        action='store_true',
                        default=False,
-                       help='also write types of DEM points (as separate GeoTiffs)')
+                       help='also write types of DEM cells (as separate GeoTiffs)')
 argparser.add_argument('--nproc', type=int,
                        default=-1,
                        help='the number of processes (default: same as the number of CPU cores)')
-argparser.add_argument('--target-dir', dest='target_dirs', type=str, nargs='+',
-                       default=None,
-                       help='process all zip files in this directory')
 
 if __name__ == '__main__':
     args = argparser.parse_args()
     #
-    targets = (Path(x) for x in args.zipfiles)
-    if args.target_dirs is not None:
-        targets = chain(targets,
-                        *[Path(d).glob('*.zip') for d in args.target_dirs])
+    target_paths = [Path(x) for x in args.targets]
+    targets_as_files = (d for d in target_paths if d.is_file())
+    targets_as_dirs  = [Path(d).glob('*.zip') for d in target_paths if d.is_dir()]
+    targets = chain(targets_as_files, *targets_as_dirs)
     #
     Parallel(n_jobs = args.nproc)(
         delayed(convert_dem)(p, args.dest, args.with_type) for p in targets
