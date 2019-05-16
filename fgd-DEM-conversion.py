@@ -248,7 +248,8 @@ class DEMRasterizer:
             raise RuntimeError(repr(res) + ': could not import from EPSG')
         destination.SetProjection(srs.ExportToWkt())
         destination.GetRasterBand(1).WriteArray(raster)
-        destination.GetRasterBand(1).SetNoDataValue(-9999.0)
+        if raster_type == 'Altitude':
+            destination.GetRasterBand(1).SetNoDataValue(-9999.0)
         destination.FlushCache()
         destination = None
         return
