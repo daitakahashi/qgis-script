@@ -18,6 +18,7 @@ from pathlib import Path
 from itertools import chain
 from zipfile import ZipFile
 from argparse import ArgumentParser, RawTextHelpFormatter
+from fractions import Fraction
 
 from xml.etree.ElementTree import parse as parseXML
 from pandas import read_csv, Series
@@ -234,8 +235,11 @@ class DEMRasterizer:
         # DEM区画は，経緯度により四角く分割された１メッシュを表し，そのメッシュ内がさらにグリッドにより格子状に
         # 分割されたセルに標高値が割り当てられる。(p.15)
         # --> an "extent" in the dataset seems to be an extent of rectangular grid cells (not points)
-        (xmin, ymin, xmax, ymax) = [min(self.lon), min(self.lat),
-                                    max(self.lon), max(self.lat)]
+        
+        # !! WARNING: Here, I try to 'recreate' precisions of corner points !!
+        (xmin, ymin, xmax, ymax) = [float(Fraction(x).limit_denominator(10000))
+                                    for x in [min(self.lon), min(self.lat),
+                                              max(self.lon), max(self.lat)]]
         dx = (xmax - xmin)/raster.shape[1]
         dy = (ymax - ymin)/raster.shape[0]
         geotransform = (xmin, dx, 0, ymax, 0, -dy)
