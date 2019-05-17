@@ -77,6 +77,7 @@ DEM_point_category = CategoricalDtype([
     'その他'      # 5
 ])
 NODATA_code = Series(['データなし'], dtype=DEM_point_category).cat.codes[0]
+NODATA_value = -9999.0
 
 ns = {
     'fgd': 'http://fgd.gsi.go.jp/spec/2008/FGD_GMLSchema',
@@ -134,7 +135,7 @@ class demPatch:
         # The default value is 'nodata'
         self.state_array = np.full(cell_count, NODATA_code,
                                    dtype=cell_type['Cell_type']['np'])
-        self.cell_array = np.full(cell_count, -9999.0,
+        self.cell_array = np.full(cell_count, NODATA_value,
                                   dtype=cell_type['Altitude']['np'])
         #
         # なお，先頭部分で連続した構成点の値が存在しない場合は，valuesにおける値の指定
@@ -203,7 +204,7 @@ class DEMRasterizer:
         pshape = patches[0].cell_array.shape
         image_dimension = (pshape*grid_size).astype(int)
         #
-        raster = np.full(tuple(image_dimension), -9999.0,
+        raster = np.full(tuple(image_dimension), NODATA_value,
                          dtype=cell_type['Altitude']['np'])
         gtype = np.full(tuple(image_dimension), NODATA_code,
                         dtype=cell_type['Cell_type']['np'])
@@ -257,7 +258,7 @@ class DEMRasterizer:
         destination.SetProjection(srs.ExportToWkt())
         destination.GetRasterBand(1).WriteArray(raster)
         if raster_type == 'Altitude':
-            destination.GetRasterBand(1).SetNoDataValue(-9999.0)
+            destination.GetRasterBand(1).SetNoDataValue(NODATA_value)
         destination.FlushCache()
         destination = None
         return
