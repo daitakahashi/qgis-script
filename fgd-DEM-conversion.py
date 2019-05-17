@@ -275,7 +275,7 @@ Covert DEMs published by Geospatial Information Authority of Japan to GeoTiffs
 ''',
                            formatter_class=RawTextHelpFormatter)
 
-argparser.add_argument('targets', metavar='target', type=str, nargs='*',
+argparser.add_argument('targets', metavar='target', type=str, nargs='+',
                        help='a target zip file or a directory containing zip files')
 
 argparser.add_argument('--dest-dir', dest='dest', type=str,
