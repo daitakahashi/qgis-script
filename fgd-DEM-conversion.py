@@ -11,26 +11,29 @@
 ***************************************************************************
 """
 
+from os import cpu_count
 from io import StringIO
 from warnings import warn
 from pathlib import Path
 from itertools import chain
 from zipfile import ZipFile
-from argparse import ArgumentParser
+from argparse import ArgumentParser, RawTextHelpFormatter
 
 from xml.etree.ElementTree import parse as parseXML
 from pandas import read_csv, Series
 from pandas.api.types import CategoricalDtype
 import numpy as np
 
+# Below joblib is just for performance.
+# Thus, I simply ignore it if the package is not available.
 try:
     from joblib import Parallel, delayed
 except ImportError:
     # use a fake version instead. no parallel prcessings
-    def iterate(gen):
-        for x in gen:
-            pass
-    def Parallel(n_jobs = 1):
+    def Parallel(**x):
+        def iterate(gen):
+            for x in gen:
+                pass
         return iterate
     def delayed(f):
         return f
@@ -177,6 +180,7 @@ class DEMRasterizer:
         zp = ZipFile(str(self.zipfile_path))
         zp_filelist = [x.filename for x in zp.infolist()]
         patches = [demPatch(parseXML(zp.open(x))) for x in zp_filelist]
+        zp.close()
         ext = patches[0].extent
         for x in patches:
             ext = ext.merge(x.extent)
@@ -263,19 +267,39 @@ def convert_dem (path_string, destdir, write_cell_type):
 
 argparser = ArgumentParser(description = '''
 Covert DEMs published by Geospatial Information Authority of Japan to GeoTiffs
-''')
+''',
+                           formatter_class=RawTextHelpFormatter)
+
 argparser.add_argument('targets', metavar='target', type=str, nargs='*',
                        help='a target zip file or a directory containing zip files')
+
 argparser.add_argument('--dest-dir', dest='dest', type=str,
                        default='.',
                        help='a destination directory to write tiff files')
+
+cat_codes_help = ', '.join(['{}: {}'.format(*x)
+                            for x in enumerate(DEM_point_category.categories.to_list())])
 argparser.add_argument('--with-cell-type', dest='with_type',
                        action='store_true',
                        default=False,
-                       help='also write types of DEM cells (as separate GeoTiffs)')
+                       help='also rasterize cell types\n(' + cat_codes_help + ')')
+
+# Try to use physical cores by assuming there are 2 logical cores per physical core.
+# But note, the preformance is limited by IO rather than computation.
+default_nprocs = int(max(1, round(cpu_count()/2)))
 argparser.add_argument('--nproc', type=int,
-                       default=-1,
-                       help='the number of processes (default: same as the number of CPU cores)')
+                       default=default_nprocs,
+                       help='the number of processes (default = %d)' % default_nprocs)
+
+# This argument will be passed directly to joblib.Parallel. The joblib document says
+# as follows:
+# The verbosity level: if non zero, progress messages are printed. Above 50, the output
+# is sent to stdout. The frequency of the messages increases with the verbosity level.
+# If it more than 10, all iterations are reported.
+# https://joblib.readthedocs.io/en/latest/parallel.html
+argparser.add_argument('--verbose', type=int,
+                       default=0,
+                       help='verbosity level (> 0 gives verbose messages, default = 0)')
 
 if __name__ == '__main__':
     args = argparser.parse_args()
@@ -285,7 +309,7 @@ if __name__ == '__main__':
     targets_as_dirs  = [Path(d).glob('*.zip') for d in target_paths if d.is_dir()]
     targets = chain(targets_as_files, *targets_as_dirs)
     #
-    Parallel(n_jobs = args.nproc)(
+    Parallel(n_jobs = args.nproc, verbose=args.verbose)(
         delayed(convert_dem)(p, args.dest, args.with_type) for p in targets
     )
     exit
