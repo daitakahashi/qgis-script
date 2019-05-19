@@ -258,7 +258,7 @@ class DEMRasterizer:
         dx = (xmax - xmin)/raster.shape[1]
         dy = (ymax - ymin)/raster.shape[0]
         geotransform = (xmin, dx, 0, ymax, 0, -dy)
-        destination = gdal.GetDriverByName('GTiff').Create(fpath.name,
+        destination = gdal.GetDriverByName('GTiff').Create(str(fpath),
                                                            raster.shape[1],
                                                            raster.shape[0],
                                                            1,
