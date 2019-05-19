@@ -78,6 +78,14 @@ DEM_point_category = CategoricalDtype([
 ])
 NODATA_code = Series(['データなし'], dtype=DEM_point_category).cat.codes[0]
 NODATA_value = -9999.0
+category_colors = {
+    'データなし': (  0,   0,   0, 255), # black
+    '地表面':    (165,  42,  42, 255), # brawn
+    '表層面':    ( 34, 139,  34, 255), # forestgreen
+    '海水面':    (  0,   0, 255, 255), # blue
+    '内水面':    (135, 206, 235, 255), # skyblue
+    'その他':    (190, 190, 190, 255)  # gray
+}
 
 ns = {
     'fgd': 'http://fgd.gsi.go.jp/spec/2008/FGD_GMLSchema',
@@ -143,7 +151,7 @@ class demPatch:
         # startSequenceで指定する。(p.18) <-- startPoint?
         startPoint = read_as_num(
             coverage.find('./gml:coverageFunction/gml:GridFunction/gml:startPoint',
-                    ns).text
+                          ns).text
         ).astype(int)
         npaddings = startPoint[0] + startPoint[1]*shape[0]
         #
@@ -257,8 +265,17 @@ class DEMRasterizer:
             raise RuntimeError(repr(res) + ': could not import from EPSG')
         destination.SetProjection(srs.ExportToWkt())
         destination.GetRasterBand(1).WriteArray(raster)
+        #
+        # Add attributes (e.g. nodata values) on the raster data
         if raster_type == 'Altitude':
             destination.GetRasterBand(1).SetNoDataValue(NODATA_value)
+        elif raster_type == 'Cell_type':
+            ct = gdal.ColorTable()
+            # colorize categories
+            for (ix, (name, color)) in enumerate(category_colors.items()):
+                ct.SetColorEntry(ix, color)
+            destination.GetRasterBand(1).SetColorTable(ct)
+        #
         destination.FlushCache()
         destination = None
         return
