@@ -21,16 +21,15 @@ from argparse import ArgumentParser, RawTextHelpFormatter
 from fractions import Fraction
 
 from xml.etree.ElementTree import parse as parseXML
-from pandas import read_csv, Series
+from pandas import read_csv, Series, DataFrame
 from pandas.api.types import CategoricalDtype
 import numpy as np
 
-# Below joblib is just for performance.
-# Thus, I simply ignore it if the package is not available.
+# Import joblib just for performance, or simply ignore it
 try:
     from joblib import Parallel, delayed
 except ImportError:
-    # use a fake version instead. no parallel prcessings
+    # use fake functions instead. no parallel prcessings
     def Parallel(**x):
         def iterate(gen):
             for x in gen:
@@ -42,9 +41,14 @@ except ImportError:
 from osgeo import gdal
 from osgeo import osr
 
-# reference:
-# 基盤地図情報ダウンロードデータ ファイル仕様書 第4.1版
-# FGD_GMLSchema.xsd v4.1
+# References:
+# 国土交通省国土地理院 (2016).
+#   基盤地図情報ダウンロードデータ ファイル仕様書 第4.1版
+#   https://fgd.gsi.go.jp/otherdata/spec/FGD_DLFileSpecV4.1.pdf
+# -- (2016).
+#   基盤地図情報 ダウンロードデータ用 XML Schema (GML版) V4.1
+#   FGD_GMLSchema.xsd v4.1
+#   https://fgd.gsi.go.jp/otherdata/spec/FGD_GMLSchemaV4.1.zip
 
 def read_as_num(txt):
     return np.array([float(x) for x in txt.strip().split(' ') if x != ''])
@@ -78,14 +82,16 @@ DEM_point_category = CategoricalDtype([
 ])
 NODATA_code = Series(['データなし'], dtype=DEM_point_category).cat.codes[0]
 NODATA_value = -9999.0
-category_colors = {
-    'データなし': (  0,   0,   0, 255), # black
-    '地表面':    (165,  42,  42, 255), # brawn
-    '表層面':    ( 34, 139,  34, 255), # forestgreen
-    '海水面':    (  0,   0, 255, 255), # blue
-    '内水面':    (135, 206, 235, 255), # skyblue
-    'その他':    (190, 190, 190, 255)  # gray
-}
+category_colors = DataFrame([
+    # Catrgory     R    G    B    A
+    ('データなし',   0,   0,   0, 255), # black
+    ('地表面',     165,  42,  42, 255), # brawn
+    ('表層面',      34, 139,  34, 255), # forestgreen
+    ('海水面',       0,   0, 255, 255), # blue
+    ('内水面',     135, 206, 235, 255), # skyblue
+    ('その他',     190, 190, 190, 255)  # gray
+])
+category_colors[0] = category_colors[0].astype(DEM_point_category).cat.codes
 
 ns = {
     'fgd': 'http://fgd.gsi.go.jp/spec/2008/FGD_GMLSchema',
@@ -272,8 +278,8 @@ class DEMRasterizer:
         elif raster_type == 'Cell_type':
             ct = gdal.ColorTable()
             # colorize categories
-            for (ix, (name, color)) in enumerate(category_colors.items()):
-                ct.SetColorEntry(ix, color)
+            for (ix, *color) in category_colors.itertuples(index=False):
+                ct.SetColorEntry(ix, tuple(color))
             destination.GetRasterBand(1).SetColorTable(ct)
         #
         destination.FlushCache()
