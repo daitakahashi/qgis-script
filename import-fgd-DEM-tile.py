@@ -27,6 +27,7 @@ from qgis.core import (QgsProcessing,
                        QgsProcessingParameterExtent,
                        QgsProcessingParameterEnum,
                        QgsProcessingParameterBoolean,
+                       QgsProcessingParameterNumber,
                        QgsProcessingParameterRasterDestination,
                        QgsCoordinateReferenceSystem)
 import processing
@@ -38,10 +39,11 @@ import numpy as np
 
 class importFGDDEMTiles(QgsProcessingAlgorithm):
 
-    INPUT      = 'INPUT'
-    DEMTYPE    = 'DEMTYPE'
-    CLEARCACHE = 'CLEARCACHE'
-    OUTPUT     = 'OUTPUT'
+    INPUT        = 'INPUT'
+    DEMTYPE      = 'DEMTYPE'
+    CLEARCACHE   = 'CLEARCACHE'
+    NODATA_VALUE = 'NODATA_VALUE'
+    OUTPUT       = 'OUTPUT'
 
     def tr(self, string):
         return QCoreApplication.translate('Processing', string)
@@ -73,14 +75,14 @@ For the data sourses and further details, please visit https://maps.gsi.go.jp/de
 ''')
 
     def initAlgorithm(self, config=None):
-
+        
         self.addParameter(
             QgsProcessingParameterExtent(
                 self.INPUT,
                 self.tr('DEM extent')
             )
         )
-
+        
         self.addParameter(
             QgsProcessingParameterEnum(
                 self.DEMTYPE,
@@ -89,7 +91,7 @@ For the data sourses and further details, please visit https://maps.gsi.go.jp/de
                 defaultValue=0
             )
         )
-
+        
         self.addParameter(
             QgsProcessingParameterBoolean(
                 self.CLEARCACHE,
@@ -97,7 +99,15 @@ For the data sourses and further details, please visit https://maps.gsi.go.jp/de
                 defaultValue=False
             )
         )
-
+        
+        self.addParameter(
+            QgsProcessingParameterNumber(
+                self.NODATA_VALUE,
+                self.tr('Nodata value'),
+                defaultValue=-9999.0
+            )
+        )
+        
         self.addParameter(
             QgsProcessingParameterRasterDestination(
                 self.OUTPUT,
@@ -131,6 +141,7 @@ For the data sourses and further details, please visit https://maps.gsi.go.jp/de
             # Recreate cache directory if requested
             shutil.rmtree(tilecache_directory)
             tilecache_directory.mkdir()
+        
         #
         # Setup constants
         #
@@ -158,7 +169,21 @@ For the data sourses and further details, please visit https://maps.gsi.go.jp/de
             demtype = 'dem_png'
             zoomlevel = 14
         else:
-            raise QgsProcessingException('Invalid DEM type')
+            raise QgsProcessingException('Unimplemented DEM type')
+        
+        # Choose a value representing nodata. Because a geotiff stores its nodata value
+        # as a text-serialized number, use of non-integer values will cause roundoff
+        # errors. Also, some algorithms (e.g., merge) seem to assume that the nodata
+        # value is a proper number; therefore, NaN, -inf, or other special values may
+        # not work well with those algorithms despite their logical correspondences
+        # with 'no data'.
+        # The default value is -9999.0, which is the same value as the original dataset
+        # '基盤地図情報数値標高モデル'.
+        nodata_value = self.parameterAsDouble(
+            parameters,
+            self.NODATA_VALUE,
+            context
+        )
         
         # PNG形式の場合
         # 24ビットカラーのPNG形式で、一つのタイルの大きさは256ピクセル×256ピクセルです。
@@ -304,7 +329,7 @@ For the data sourses and further details, please visit https://maps.gsi.go.jp/de
                 'PICT':          False,
                 'SEPARATE':      False,
                 'NODATA_INPUT':  np.nan,
-                'NODATA_OUTPUT': np.nan,
+                'NODATA_OUTPUT': nodata_value,
                 'DATA_TYPE':     5, # float32
                 'OUTPUT':        parameters[self.OUTPUT]
             }, context=context, feedback=feedback, is_child_algorithm=True)['OUTPUT']
