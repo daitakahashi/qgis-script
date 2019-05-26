@@ -34,6 +34,16 @@ import processing
 
 from osgeo import osr, gdal
 
+# This code depends on Pillow (as PIL). QtGui.QImage maybe an option,
+# because it is available by default.
+# But compare to Pillow, the QImage seems to be much less popular in the internet,
+# so I prefer Pillow rather than QImage.
+#
+# Also, gdal is one more option, though, there are two drivers 'dods' (for OPeNDAP)
+# and 'http' (for remote images) conflicting when 'Open()' an 'http://*' file
+# (for example, https://trac.osgeo.org/gdal/ticket/2696).
+# Unlike ogr, of which drivers have Open() method, I did not find a way to select
+# a specific gdal driver to open a file.
 from PIL import Image
 import numpy as np
 
