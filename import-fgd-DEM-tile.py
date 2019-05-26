@@ -290,11 +290,12 @@ For the data sourses and further details, please visit https://maps.gsi.go.jp/de
         xmin = extent.xMinimum()
         ymax = extent.yMaximum()
         ymin = extent.yMinimum()
+        margin = 0.00001
 
-        index_x_lower = 2**(zoomlevel - 1) + int(xmin/tile_size)
-        index_x_upper = 2**(zoomlevel - 1) + int(math.ceil(xmax/tile_size))
-        index_y_lower = 2**(zoomlevel - 1) - int(math.ceil(ymax/tile_size))
-        index_y_upper = 2**(zoomlevel - 1) - int(ymin/tile_size)
+        index_x_lower = 2**(zoomlevel - 1) + int(xmin/tile_size + margin)
+        index_x_upper = 2**(zoomlevel - 1) + int(math.ceil(xmax/tile_size - margin))
+        index_y_lower = 2**(zoomlevel - 1) - int(math.ceil(ymax/tile_size - margin))
+        index_y_upper = 2**(zoomlevel - 1) - int(ymin/tile_size + margin)
         
         index_x_range = range(index_x_lower, index_x_upper)
         index_y_range = range(index_y_lower, index_y_upper)
