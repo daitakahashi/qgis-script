@@ -34,17 +34,6 @@ import processing
 
 from osgeo import osr, gdal
 
-# This code depends on Pillow (as PIL). QtGui.QImage maybe an option,
-# because it is available by default.
-# But compare to Pillow, the QImage seems to be much less popular in the internet,
-# so I prefer Pillow rather than QImage.
-#
-# Also, gdal is one more option, though, there are two drivers 'dods' (for OPeNDAP)
-# and 'http' (for remote images) conflicting when 'Open()' an 'http://*' file
-# (for example, https://trac.osgeo.org/gdal/ticket/2696).
-# Unlike ogr, of which drivers have Open() method, I did not find a way to select
-# a specific gdal driver to open a file.
-from PIL import Image
 import numpy as np
 
 class importFGDDEMTiles(QgsProcessingAlgorithm):
@@ -252,13 +241,23 @@ For the data sourses and further details, please visit https://maps.gsi.go.jp/de
             tiff_options = []
             try:
                 with urllib.request.urlopen(url) as img_data:
-                    with Image.open(img_data) as img:
-                        img_array = np.array(img)
-                        m += img_array[:,:,0]
-                        m *= 2**8
-                        m += img_array[:,:,1]
-                        m *= 2**8
-                        m += img_array[:,:,2]
+                    # To avoid possible conflicts between a dods and an
+                    # http drivers of gdal, I download a png tile
+                    # and load it from its local copy.
+                    img_path = tile_directory / '{}.png'.format(index_y)
+                    with open(img_path, 'wb') as saved_img:
+                        saved_img.write(img_data.read())
+                    
+                    img = gdal.Open(str(img_path))
+                    img_r = img.GetRasterBand(1)
+                    img_g = img.GetRasterBand(2)
+                    img_b = img.GetRasterBand(3)
+                    m += img_r.ReadAsArray()
+                    m *= 2**8
+                    m += img_g.ReadAsArray()
+                    m *= 2**8
+                    m += img_b.ReadAsArray()
+                    img = None
                 
             except urllib.error.URLError as e:
                 if e.code == 404:
